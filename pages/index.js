@@ -1,114 +1,208 @@
-import { useEffect, useState } from 'react';
-import { createClient } from '@supabase/supabase-js';
+import { useEffect, useState } from "react";
+import { createClient } from "@supabase/supabase-js";
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-const supabase = createClient(supabaseUrl, supabaseKey);
+// Supabase client
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+);
 
-export default function Home() {
+// ⚡ Set your username here (You = yourself, Friend = your friend)
+// Change only this line for identity
+const CURRENT_USER = "You"; // or "Friend"
+
+export default function Chat() {
   const [messages, setMessages] = useState([]);
-  const [newMessage, setNewMessage] = useState('');
-  const [status, setStatus] = useState('offline');
-  const [lastSeen, setLastSeen] = useState(null);
+  const [newMessage, setNewMessage] = useState("");
+  const [friendStatus, setFriendStatus] = useState("offline");
+  const [friendLastSeen, setFriendLastSeen] = useState(null);
 
-  // Load messages on mount
+  // Load old messages + subscribe realtime
   useEffect(() => {
     fetchMessages();
+    subscribeMessages();
+    updatePresence("online");
 
-    // Realtime listener
-    const channel = supabase
-      .channel('chat-room')
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, payload => {
-        setMessages(prev => [...prev, payload.new]);
-      })
-      .subscribe();
-
+    const interval = setInterval(() => {
+      updatePresence("online");
+    }, 15000); // ping every 15 sec like WhatsApp
     return () => {
-      supabase.removeChannel(channel);
+      clearInterval(interval);
+      updatePresence("offline");
     };
   }, []);
 
-  // Fetch messages from Supabase
+  // Fetch old messages
   async function fetchMessages() {
-    const { data, error } = await supabase
-      .from('messages')
-      .select('*')
-      .order('created_at', { ascending: true });
+    let { data } = await supabase
+      .from("messages")
+      .select("*")
+      .order("created_at", { ascending: true });
+    setMessages(data || []);
+  }
 
-    if (!error) {
-      setMessages(data);
+  // Subscribe for new messages
+  function subscribeMessages() {
+    supabase
+      .channel("chat-messages")
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "messages" },
+        (payload) => {
+          setMessages((prev) => [...prev, payload.new]);
+        }
+      )
+      .subscribe();
+
+    supabase
+      .channel("chat-presence")
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "presence" },
+        handlePresence
+      )
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "presence" },
+        handlePresence
+      )
+      .subscribe();
+  }
+
+  // Handle presence updates
+  function handlePresence(payload) {
+    const p = payload.new;
+    if (p.user !== CURRENT_USER) {
+      setFriendStatus(p.status);
+      setFriendLastSeen(p.last_seen);
     }
+  }
+
+  // Update presence
+  async function updatePresence(status) {
+    await supabase.from("presence").upsert({
+      user: CURRENT_USER,
+      status,
+      last_seen: new Date().toISOString(),
+    });
   }
 
   // Send message
   async function sendMessage() {
-    if (newMessage.trim() === '') return;
-
-    await supabase.from('messages').insert([
-      { text: newMessage, sender: 'me' }
-    ]);
-
-    setNewMessage('');
+    if (newMessage.trim() === "") return;
+    await supabase.from("messages").insert({
+      text: newMessage,
+      sender: CURRENT_USER,
+    });
+    setNewMessage("");
   }
 
-  // Presence tracking (online/offline + last seen)
-  useEffect(() => {
-    const updateStatus = async (state) => {
-      const now = new Date().toISOString();
-      if (state === 'online') {
-        await supabase.from('presence').upsert([{ user: 'me', status: 'online', last_seen: now }]);
-      } else {
-        await supabase.from('presence').upsert([{ user: 'me', status: 'offline', last_seen: now }]);
-      }
-    };
-
-    // Mark online
-    updateStatus('online');
-
-    // On unload (offline)
-    const handleUnload = () => {
-      updateStatus('offline');
-    };
-    window.addEventListener('beforeunload', handleUnload);
-
-    // Poll friend's status every 5s
-    const interval = setInterval(async () => {
-      const { data } = await supabase.from('presence').select('*').eq('user', 'friend').single();
-      if (data) {
-        setStatus(data.status);
-        setLastSeen(data.last_seen);
-      }
-    }, 5000);
-
-    return () => {
-      handleUnload();
-      clearInterval(interval);
-      window.removeEventListener('beforeunload', handleUnload);
-    };
-  }, []);
-
   return (
-    <div className="chat-box">
-      <h2>My Chat App</h2>
-      <p>
-        Friend is {status} {status === 'offline' && lastSeen ? `(last seen ${new Date(lastSeen).toLocaleTimeString()})` : ''}
-      </p>
+    <div style={styles.container}>
+      <div style={styles.header}>
+        <strong>Friend</strong>
+        <div style={{ fontSize: "12px", color: "#ddd" }}>
+          {friendStatus === "online"
+            ? "Online"
+            : friendLastSeen
+            ? `Last seen ${new Date(friendLastSeen).toLocaleTimeString()}`
+            : "Offline"}
+        </div>
+      </div>
 
-      <div>
-        {messages.map((msg, i) => (
-          <div key={i} className={`message ${msg.sender === 'me' ? 'self' : 'friend'}`}>
-            {msg.text}
+      <div style={styles.chat}>
+        {messages.map((msg) => (
+          <div
+            key={msg.id}
+            style={{
+              ...styles.message,
+              ...(msg.sender === CURRENT_USER
+                ? styles.myMessage
+                : styles.friendMessage),
+            }}
+          >
+            <div style={{ fontSize: "12px", opacity: 0.7 }}>
+              {msg.sender}
+            </div>
+            <div>{msg.text}</div>
           </div>
         ))}
       </div>
 
-      <input
-        type="text"
-        value={newMessage}
-        onChange={e => setNewMessage(e.target.value)}
-        placeholder="Type a message..."
-      />
-      <button onClick={sendMessage}>Send</button>
+      <div style={styles.inputBox}>
+        <input
+          type="text"
+          placeholder="Type a message..."
+          value={newMessage}
+          onChange={(e) => setNewMessage(e.target.value)}
+          style={styles.input}
+        />
+        <button onClick={sendMessage} style={styles.sendBtn}>
+          Send
+        </button>
+      </div>
     </div>
   );
 }
+
+// WhatsApp-like CSS-in-JS
+const styles = {
+  container: {
+    display: "flex",
+    flexDirection: "column",
+    height: "100vh",
+    maxWidth: "600px",
+    margin: "0 auto",
+    background: "#0f172a",
+    color: "white",
+    fontFamily: "Arial, sans-serif",
+  },
+  header: {
+    padding: "12px",
+    borderBottom: "1px solid #334155",
+    background: "#1e293b",
+  },
+  chat: {
+    flex: 1,
+    padding: "10px",
+    overflowY: "auto",
+    display: "flex",
+    flexDirection: "column",
+    gap: "8px",
+  },
+  message: {
+    padding: "10px",
+    borderRadius: "8px",
+    maxWidth: "70%",
+  },
+  myMessage: {
+    alignSelf: "flex-end",
+    background: "#3b82f6",
+    color: "white",
+  },
+  friendMessage: {
+    alignSelf: "flex-start",
+    background: "#334155",
+    color: "white",
+  },
+  inputBox: {
+    display: "flex",
+    gap: "8px",
+    padding: "10px",
+    borderTop: "1px solid #334155",
+  },
+  input: {
+    flex: 1,
+    padding: "10px",
+    borderRadius: "6px",
+    border: "none",
+  },
+  sendBtn: {
+    padding: "10px 16px",
+    background: "#3b82f6",
+    border: "none",
+    borderRadius: "6px",
+    color: "white",
+    cursor: "pointer",
+  },
+};
